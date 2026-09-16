@@ -1,0 +1,2115 @@
+openapi: 3.0.3
+info:
+  title: GP-Jammer Local API
+  version: 1.0.0
+  contact:
+    name: GP-Jammer API Documentation
+  description: |
+    Local HTTP API for controlling **GP-Jammer** SDR devices: browse the
+    interference library, configure SDR settings, select interference parameters,
+    start or stop signal generation, and read generation logs.
+
+    ## API server setup (GP-Jammer application)
+
+    Configure the API in the desktop application before sending any requests:
+
+    1. Open **GP-Jammer** as administrator.
+    2. Open the left sidebar and select **SETTINGS**.
+    3. Select the **API SERVER** tab.
+    4. In **LOCAL API SERVER SETTINGS**, enable **Enable API Server**.
+    5. Set **Port** - the TCP port the HTTP server listens on (default `5000`).
+       Ensure the port is not blocked or already in use. Use this port in API
+       clients as `http://localhost:<port>`.
+    6. Set **Timeout, ms** - internal timeout for the local API server (default
+       `15000`). Increase the value if clients receive timeout errors, then click
+       **APPLY**.
+    7. Optional: enable **Allow Remote Access** to accept connections from other
+       machines on the network. Requires elevated privileges to register the
+       port and add a firewall exception.
+    8. Choose **Authorization**:
+       - **No Auth** - requests work without the `GP-Jammer-API-Key` header.
+       - **API key** - copy the key from this screen (or click **Generate** for
+         a new one) and send it in every request header.
+    9. Click **APPLY** to save changes.
+
+    All paths in this specification are relative to `http://localhost:<port>`.
+
+    ## Authentication
+
+    Authorization is configured on **SETTINGS -> API SERVER** in
+    **LOCAL API SERVER SETTINGS**.
+    Click **APPLY** after changing the mode.
+
+    | Mode in application | Client behavior |
+    | --- | --- |
+    | No Auth | Do not send `GP-Jammer-API-Key`. Requests should work without it. |
+    | API key | Send `GP-Jammer-API-Key: <key>` on every request. |
+
+    Header format:
+
+    ```
+    GP-Jammer-API-Key: <your-api-key>
+    ```
+
+    The header name is shown in the application next to the key field.
+    Find the active key or create a new one with **Generate**, then **APPLY**.
+
+    **API key mode** (Authorization Mode = **API key**):
+
+    | HTTP | When | Response body |
+    | --- | --- | --- |
+    | `200` | Valid `GP-Jammer-API-Key` | Success body for the endpoint |
+    | `401` | Header completely missing | `{ "status": "error", "message": "Missing GP-Jammer-API-Key" }` |
+    | `403` | Header present with invalid key | `{ "status": "error", "message": "Invalid GP-Jammer-API-Key" }` |
+
+    **No Auth mode** (Authorization Mode = **No Auth**, then **APPLY**):
+
+    - Requests without `GP-Jammer-API-Key` return `200 OK` with the normal success body.
+
+    Notes for API clients:
+
+    - Do not send an empty header value (`GP-Jammer-API-Key:` with no value).
+      An empty or wrong value returns `403`, not `401`.
+    - To get `401` (missing key), omit the header entirely.
+
+    ## Response formats
+
+    | Pattern | Used by |
+    | --- | --- |
+    | `{ "status": "ok", "data": ... }` | List and detail endpoints |
+    | `{ "status": "ok", "message": "..." }` | Commands (settings update, start, stop, interference) |
+    | `{ "status": "error", "message": "..." }` | Error responses |
+    | `[ { "timestamp", "channel", "action", "info", "interference?" }, ... ]` | `GET /logs/gen` only |
+
+    ## Common error responses
+
+    | HTTP | When |
+    | --- | --- |
+    | 401 | `GP-Jammer-API-Key` header is missing |
+    | 403 | API key is invalid |
+    | 404 | Wrong API path (for example `/sdr/` instead of `/sdrs`) |
+    | 405 | HTTP method not allowed (`Method <METHOD> not allowed`) |
+    | 500 | Internal failure (`Internal error occurred. Check GP-Jammer App error log`) |
+
+    ## Quick start
+
+    1. Complete the **API server setup** steps above.
+    2. Call `GET /gp-jammer/api/v1/sdrs` to list devices and read each `userAlias`.
+    3. Call `GET /gp-jammer/api/v1/interferences` then `GET /interferences/info`.
+    4. Select interference with `POST .../interference`, then `POST .../start`.
+    5. If API key authorization is enabled, add `GP-Jammer-API-Key` to every request.
+
+    All paths in this specification are relative to `http://localhost:<port>`.
+
+servers:
+  - url: http://localhost:5000
+    description: |
+      Default GP-Jammer local API server from the examples. Change the port if
+      you configured a different value in API Settings.
+  - url: http://localhost:{port}
+    description: |
+      Use this entry when GP-Jammer listens on a custom port.
+    variables:
+      port:
+        default: "5000"
+        description: TCP port from GP-Jammer API Settings.
+
+tags:
+  - name: SDR Devices
+    description: Discover available SDR devices and read device details.
+  - name: SDR Settings
+    description: Read and update SDR configuration (IQ rate, center frequency, gain).
+  - name: Interference Library
+    description: Browse available interferences and read parameter definitions.
+  - name: Interference Selection
+    description: Select an interference and generate IQ data for an SDR device.
+  - name: Generation Control
+    description: Start and stop signal generation for a selected SDR device.
+  - name: Logs
+    description: Read generation log entries from GP-Jammer.
+
+x-tagGroups:
+  - name: Devices
+    tags:
+      - SDR Devices
+      - SDR Settings
+  - name: Library
+    tags:
+      - Interference Library
+  - name: Generation
+    tags:
+      - Generation Control
+      - Interference Selection
+  - name: Monitoring
+    tags:
+      - Logs
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /gp-jammer/api/v1/interferences:
+    get:
+      tags:
+        - Interference Library
+      operationId: listInterferences
+      summary: List all interferences
+      description: |
+        Lists all base paths and interference names available for selection.
+
+        Use this endpoint first. Each item in `data` has:
+
+        | Field | Type | Description |
+        | --- | --- | --- |
+        | `base` | string | Local folder path of an interference library |
+        | `names` | string[] | Interference names relative to that `base` |
+
+        Pass a `base` + one `name` to:
+
+        - `GET /gp-jammer/api/v1/interferences/info`
+        - `POST /gp-jammer/api/v1/sdrs/{sdr_alias}/interference`
+
+        Auth errors match other endpoints (`401` / `403`). Wrong methods
+        return `405` with `Method <METHOD> not allowed`.
+      security:
+        - {}
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: List of available interference groups.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InterferenceListResponse"
+              examples:
+                gpspatronPythonData:
+                  summary: Local GPSPATRON Python data library
+                  description: |
+                    Example library list. `base` and `names` are
+                    installation-specific and can change with installed packs.
+                  value:
+                    data:
+                      - base: 'C:\Users\User\AppData\Local\GPSPATRON\GP-Jammer\Python data'
+                        names:
+                          - Basic Modulations\AWGN-Chirp
+                          - Basic Modulations\AWGN-Pulse-Frequency-Random
+                          - Basic Modulations\AWGN-Pulse-Period-Random
+                          - Basic Modulations\AWGN-Pulse
+                          - Basic Modulations\AWGN
+                          - Basic Modulations\CHIRP-Random
+                          - Basic Modulations\CHIRP
+                          - Basic Modulations\CW
+                          - Basic Modulations\CW-Multi-Tone-Pulse
+                          - Basic Modulations\CW-Multi-Tone
+                          - Basic Modulations\CW-Pulse-Random-Period
+                          - Basic Modulations\CW-Pulse
+                          - GNSS\GNSS-L1-AWGN-3bands
+                          - GNSS\GPS-CA-L1-Signal-Matched+CWI
+                          - GNSS\GPS-CA-L1-Signal-Matched
+                    status: ok
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "405":
+          description: |
+            Only `GET` is allowed on this endpoint.
+
+            Message format: `Method <METHOD> not allowed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodPost:
+                  summary: POST not allowed
+                  value:
+                    status: error
+                    message: Method POST not allowed
+                methodPut:
+                  summary: PUT not allowed
+                  value:
+                    status: error
+                    message: Method PUT not allowed
+                methodDelete:
+                  summary: DELETE not allowed
+                  value:
+                    status: error
+                    message: Method DELETE not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+  /gp-jammer/api/v1/interferences/info:
+    get:
+      tags:
+        - Interference Library
+      operationId: getInterferenceInfo
+      summary: Get interference info
+      description: |
+        Gets parameter definitions (names, descriptions, types, defaults, and
+        valid ranges) for one interference.
+
+        Query parameters:
+
+        | Param | Required | Description |
+        | --- | --- | --- |
+        | `base` | yes | Library folder path from `GET /interferences` |
+        | `name` | yes | Interference name from that group's `names` array |
+
+        Use `base` and `name` from `GET /interferences`.
+
+        Example:
+        `GET /gp-jammer/api/v1/interferences/info?base=...&name=Basic Modulations\AWGN-Chirp`
+
+        **Response fields (`data`)**
+
+        | Field | Type | Description |
+        | --- | --- | --- |
+        | `name` | string | Short interference name (for example `AWGN-Chirp`, not the full relative path) |
+        | `description` | string | Human-readable description |
+        | `variables` | array | Parameter definitions for `POST .../interference` |
+
+        **Each `variables[]` item**
+
+        | Field | Type | Description |
+        | --- | --- | --- |
+        | `name` | string | Parameter key used in the select-interference body |
+        | `type` | string | Parameter type (for example `number`) |
+        | `description` | string | UI/help text |
+        | `default` | string | Default value (scientific notation as string, for example `"1585e6"`) |
+        | `min` | string | Minimum (string, scientific notation) |
+        | `max` | string | Maximum (string, scientific notation) |
+
+        Note: `default` / `min` / `max` are **strings**, even though `type` is
+        `number`. Clients should parse them before validation or display.
+
+        Unknown or removed interference name -> `404` with
+        `Interference not found`.
+      parameters:
+        - $ref: "#/components/parameters/InterferenceBase"
+        - $ref: "#/components/parameters/InterferenceName"
+      security:
+        - {}
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Interference metadata and variable definitions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InterferenceInfoResponse"
+              examples:
+                awgnChirp:
+                  summary: AWGN-Chirp parameter definitions
+                  description: |
+                    Example for `name=Basic Modulations\AWGN-Chirp`.
+                  value:
+                    data:
+                      description: Additive White Gaussian Noise (AWGN) complexly multiplied by the Chirp signal interference
+                      name: AWGN-Chirp
+                      variables:
+                        - default: "1585e6"
+                          description: Center frequency (Hz)
+                          max: "6e9"
+                          min: "70e6"
+                          name: center_frequency
+                          type: "number"
+                        - default: "56e6"
+                          description: IQ rate (Hz)
+                          max: "56.00e6"
+                          min: "2.083334e6"
+                          name: IQ_rate
+                          type: "number"
+                        - default: "10e6"
+                          description: Noise bandwidth (Hz)
+                          max: "30e6"
+                          min: "1e3"
+                          name: noise_bandwidth
+                          type: "number"
+                        - default: "56e6"
+                          description: Sweep span (Hz)
+                          max: "60e6"
+                          min: "1e3"
+                          name: sweep_span
+                          type: "number"
+                        - default: "50e-6"
+                          description: Sweep period (s)
+                          max: "1e-1"
+                          min: "1e-6"
+                          name: sweep_period
+                          type: "number"
+                    status: ok
+        "400":
+          description: |
+            One or both required query parameters are missing.
+
+            Message formats:
+
+            | Missing | Message |
+            | --- | --- |
+            | `base` only | `Missing required parameters: base` |
+            | `name` only | `Missing required parameters: name` |
+            | both | `Missing required parameters: base, name` |
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingBase:
+                  summary: Missing base query parameter
+                  value:
+                    status: error
+                    message: "Missing required parameters: base"
+                missingName:
+                  summary: Missing name query parameter
+                  value:
+                    status: error
+                    message: "Missing required parameters: name"
+                missingBaseAndName:
+                  summary: Missing base and name
+                  value:
+                    status: error
+                    message: "Missing required parameters: base, name"
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "404":
+          description: |
+            The interference was not found under the given `base` and `name`
+            (unknown name, or the file was removed from the library).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                interferenceNotFound:
+                  summary: Interference not found
+                  description: |
+                    Returned when the interference name does not exist under
+                    the given library path (or was removed).
+                  value:
+                    status: error
+                    message: Interference not found
+        "405":
+          description: |
+            Only `GET` is allowed on this endpoint.
+
+            Message format: `Method <METHOD> not allowed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodPost:
+                  summary: POST not allowed
+                  value:
+                    status: error
+                    message: Method POST not allowed
+                methodPut:
+                  summary: PUT not allowed
+                  value:
+                    status: error
+                    message: Method PUT not allowed
+                methodDelete:
+                  summary: DELETE not allowed
+                  value:
+                    status: error
+                    message: Method DELETE not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+  /gp-jammer/api/v1/sdrs:
+    get:
+      tags:
+        - SDR Devices
+      operationId: listSdrDevices
+      summary: List all available SDR devices
+      description: |
+        Returns all SDR devices currently visible to GP-Jammer and their
+        generation status.
+
+        Use this endpoint first to get the exact `userAlias` value for each
+        device. The returned alias is used as the `{sdr_alias}` path parameter
+        in the detail, settings, start, stop, and interference endpoints.
+
+        URL-encode spaces and special characters in `{sdr_alias}`
+        (for example `Pluto%20Alias`).
+
+        **Response fields (`data[]`)**
+
+        | Field | Type | Description |
+        | --- | --- | --- |
+        | `userAlias` | string | Human-readable SDR alias |
+        | `genStatus` | boolean | `false` when generation is idle; `true` when signal generation is running on the device |
+
+        **Behavior**
+
+        - One or more connected SDRs -> `200 OK` with a non-empty `data` array
+        - Multiple devices -> one object per SDR in `data`
+        - `genStatus: false` -> device connected, generation not running
+        - `genStatus: true` -> generation is active
+        - No SDR devices connected -> `200 OK` with `"data": []`
+        - Wrong API path `/sdr/` instead of `/sdrs` -> `404`
+        - Unsupported HTTP methods (`POST`, `PUT`, `DELETE`) -> `405`
+
+      security:
+        - {}
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: |
+            List of SDR devices with generation status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SdrListResponse"
+              examples:
+                withDevicesIdle:
+                  summary: One idle Pluto SDR
+                  description: |
+                    One SDR is connected and generation is not running.
+                  value:
+                    data:
+                      - genStatus: false
+                        userAlias: Pluto Alias
+                    status: ok
+                withMultipleDevicesIdle:
+                  summary: Two idle Pluto SDRs
+                  description: |
+                    Multiple SDR devices are connected and idle.
+                    Alias names are device-specific and can change in the UI.
+                  value:
+                    data:
+                      - genStatus: false
+                        userAlias: Pluto Alias 1
+                      - genStatus: false
+                        userAlias: Pluto Alias 2
+                    status: ok
+                withDevicesRunning:
+                  summary: One SDR with active generation
+                  description: |
+                    Signal generation is running on the device.
+                    `genStatus` is `true` after generation was started
+                    (UI Start or `POST .../start`).
+                  value:
+                    data:
+                      - genStatus: true
+                        userAlias: Pluto Alias
+                    status: ok
+                noAuthMode:
+                  summary: No Auth mode without header
+                  description: |
+                    Authorization Mode is **No Auth** and the request is sent
+                    without `GP-Jammer-API-Key`.
+                  value:
+                    data:
+                      - genStatus: false
+                        userAlias: Pluto Alias
+                    status: ok
+                empty:
+                  summary: No SDR devices connected
+                  description: |
+                    GP-Jammer has no connected SDR devices.
+                  value:
+                    data: []
+                    status: ok
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "404":
+          description: |
+            The request path does not match a known endpoint.
+
+            Example for `GET /gp-jammer/api/v1/sdr/` (missing `s` in `sdrs`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                wrongPathSdr:
+                  summary: Wrong path /sdr instead of /sdrs
+                  value:
+                    status: error
+                    message: Endpoint /gp-jammer/api/v1/sdr/ not found
+        "405":
+          description: |
+            The HTTP method is not allowed on this endpoint.
+            Only `GET` is supported for listing SDR devices.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodPost:
+                  summary: POST not allowed
+                  value:
+                    status: error
+                    message: Method POST not allowed
+                methodPut:
+                  summary: PUT not allowed
+                  value:
+                    status: error
+                    message: Method PUT not allowed
+                methodDelete:
+                  summary: DELETE not allowed
+                  value:
+                    status: error
+                    message: Method DELETE not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+  /gp-jammer/api/v1/sdrs/{sdr_alias}:
+    get:
+      tags:
+        - SDR Devices
+      operationId: getSdrInfo
+      summary: Get SDR info
+      description: |
+        Returns detailed information for one SDR device.
+
+        The `{sdr_alias}` path parameter must match a `userAlias` value from
+        `GET /gp-jammer/api/v1/sdrs`. URL-encode spaces and special characters.
+
+        Alias values are device-specific and can change when SDRs are renamed
+        or replaced. Always resolve `userAlias` via the list endpoint first.
+
+        Example aliases observed in testing:
+
+        | Alias | Encoded path segment |
+        | --- | --- |
+        | `Pluto Alias 1` | `Pluto%20Alias%201` |
+        | `Pluto Alias 2` | `Pluto%20Alias%202` |
+        | `Pluto Alias` | `Pluto%20Alias` |
+
+        Alias names can change when devices are renamed in the UI. Always read
+        current values from `GET /gp-jammer/api/v1/sdrs` first.
+
+        **Response fields (`data`)**
+
+        | Field | Type | Description |
+        | --- | --- | --- |
+        | `userAlias` | string | Human-readable alias (same as list endpoint) |
+        | `id` | string | Device identifier (for example `Pluto_D`) |
+        | `firmwareVersion` | string | SDR firmware version |
+        | `genStatus` | boolean | `false` idle, `true` generation running |
+        | `settings` | object | Current SDR settings (`IQ_rate`, `center_frequency`, `gain` as numbers) |
+        | `currentInterference` | object | Optional. Selected interference when configured |
+
+        **`currentInterference` fields**
+
+        | Field | Type | Description |
+        | --- | --- | --- |
+        | `base` | string | Local library folder path |
+        | `name` | string | Interference name relative to `base` |
+        | `parameters` | object | Interference parameters. Values are returned as **strings** (for example `"56e6"`), not numbers |
+
+      parameters:
+        - $ref: "#/components/parameters/SdrAlias"
+      security:
+        - {}
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: SDR device details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SdrInfoResponse"
+              examples:
+                plutoAliasIdle:
+                  summary: Pluto Alias with AWGN-Chirp interference
+                  description: |
+                    Example for `{sdr_alias}=Pluto Alias` while generation is
+                    idle (`genStatus: false`).
+                  value:
+                    data:
+                      currentInterference:
+                        base: 'C:\Users\User\AppData\Local\GPSPATRON\GP-Jammer\Python data'
+                        name: Basic Modulations\AWGN-Chirp
+                        parameters:
+                          IQ_rate: "56e6"
+                          center_frequency: "1585e6"
+                          noise_bandwidth: "10e6"
+                          sweep_period: "5.000000e-05"
+                          sweep_span: "56e6"
+                      firmwareVersion: "1.1.5"
+                      genStatus: false
+                      id: Pluto_D
+                      settings:
+                        IQ_rate: 56000000
+                        center_frequency: 1585000000
+                        gain: -50
+                      userAlias: Pluto Alias
+                    status: ok
+                plutoAliasRunning:
+                  summary: Same device with generation running
+                  description: |
+                    Same schema and interference as the idle example;
+                    only `genStatus` is `true`.
+                  value:
+                    data:
+                      currentInterference:
+                        base: 'C:\Users\User\AppData\Local\GPSPATRON\GP-Jammer\Python data'
+                        name: Basic Modulations\AWGN-Chirp
+                        parameters:
+                          IQ_rate: "56e6"
+                          center_frequency: "1585e6"
+                          noise_bandwidth: "10e6"
+                          sweep_period: "5.000000e-05"
+                          sweep_span: "56e6"
+                      firmwareVersion: "1.1.5"
+                      genStatus: true
+                      id: Pluto_D
+                      settings:
+                        IQ_rate: 56000000
+                        center_frequency: 1585000000
+                        gain: -50
+                      userAlias: Pluto Alias
+                    status: ok
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "404":
+          description: SDR alias not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                unknownAlias:
+                  summary: Unknown SDR alias
+                  description: |
+                    Example for `GET /gp-jammer/api/v1/sdrs/NoSuchDevice`.
+                    The quoted name in `message` echoes the requested `{sdr_alias}`.
+                  value:
+                    status: error
+                    message: "SDR 'NoSuchDevice' not found"
+        "405":
+          description: |
+            The HTTP method is not allowed on this endpoint.
+            Only `GET` is supported.
+
+            Same response format as `GET /sdrs`:
+            `Method POST not allowed`, `Method PUT not allowed`,
+            `Method DELETE not allowed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodPost:
+                  summary: POST not allowed
+                  value:
+                    status: error
+                    message: Method POST not allowed
+                methodPut:
+                  summary: PUT not allowed
+                  value:
+                    status: error
+                    message: Method PUT not allowed
+                methodDelete:
+                  summary: DELETE not allowed
+                  value:
+                    status: error
+                    message: Method DELETE not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+  /gp-jammer/api/v1/sdrs/{sdr_alias}/settings:
+    get:
+      tags:
+        - SDR Settings
+      operationId: getSdrSettings
+      summary: Get SDR settings
+      description: |
+        Returns SDR configuration parameter values for one device.
+
+        **Response fields (`data`)**
+
+        | Field | Type | Description |
+        | --- | --- | --- |
+        | `IQ_rate` | number | IQ sample rate in Hz |
+        | `center_frequency` | number | Center frequency in Hz |
+        | `gain` | number | Output gain (dB) |
+
+        Values match the `settings` object inside
+        `GET /gp-jammer/api/v1/sdrs/{sdr_alias}`.
+
+        Different devices return the same three fields; only values differ
+        (for example Pluto Alias 1 and Pluto Alias 2).
+
+      parameters:
+        - $ref: "#/components/parameters/SdrAlias"
+      security:
+        - {}
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: |
+            Current SDR configuration values.
+
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SdrSettingsResponse"
+              examples:
+                plutoAlias1Settings:
+                  summary: Pluto Alias 1 settings
+                  description: |
+                    Example for `GET .../sdrs/Pluto Alias 1/settings`.
+                  value:
+                    data:
+                      IQ_rate: 56000000
+                      center_frequency: 1585000000
+                      gain: -50
+                    status: ok
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "404":
+          description: SDR alias not found or wrong URL path.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                unknownAlias:
+                  summary: Unknown SDR alias
+                  description: |
+                    Example for `GET .../sdrs/Unknown alias/settings`.
+                  value:
+                    status: error
+                    message: "SDR 'Unknown alias' not found"
+                wrongPathSetting:
+                  summary: Wrong path /setting instead of /settings
+                  description: |
+                    Example for `GET .../sdrs/Unknown%20alias/setting/`.
+                    This is an endpoint-not-found error, not an SDR-not-found error.
+                  value:
+                    status: error
+                    message: Endpoint /gp-jammer/api/v1/sdrs/Unknown%20alias/setting/ not found
+        "405":
+          description: |
+            The HTTP method is not allowed on this endpoint for GET documentation
+            context when clients call POST/PUT/DELETE incorrectly on a GET-only
+            check, or POST instead of PUT for updates.
+
+            `POST .../settings` returns `Method POST not allowed`.
+            Use `PUT` to update settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodPost:
+                  summary: POST not allowed
+                  value:
+                    status: error
+                    message: Method POST not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+    put:
+      tags:
+        - SDR Settings
+      operationId: updateSdrSettings
+      summary: Update SDR settings
+      description: |
+        Updates SDR configuration parameter values: IQ rate, center frequency,
+        and gain.
+
+        Request body uses the same three fields returned by
+        `GET .../settings`. All three fields are required.
+
+        After a successful update, values are applied in the GP-Jammer UI and
+        are visible again via `GET .../settings`.
+
+        Success message format:
+        `Updated settings for '<userAlias>'`
+
+        **Validation (`400` responses)**
+
+        | Case | Example message |
+        | --- | --- |
+        | Empty body `{}` | `Missing required parameter: 'IQ_rate'` |
+        | Missing field (for example no `gain`) | `Missing required parameter: 'gain'` |
+        | Wrong JSON type | `Invalid type for 'gain': expected double` |
+        | `gain` out of range | `Invalid value for gain: must be between -89 and 0` |
+        | `IQ_rate` out of range | `Invalid value for IQ_rate: must be between 2.083333M and 61.44M` |
+
+        All three fields (`IQ_rate`, `center_frequency`, `gain`) must be present
+        and must be JSON numbers (doubles), not strings.
+      parameters:
+        - $ref: "#/components/parameters/SdrAlias"
+      security:
+        - {}
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        description: SDR configuration values to apply.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SdrSettings"
+            examples:
+              plutoAlias1Settings:
+                summary: Update settings for Pluto Alias 1
+                description: |
+                  Changing `gain` updates the UI immediately.
+                value:
+                  IQ_rate: 56000000
+                  center_frequency: 1585000000
+                  gain: -45
+      responses:
+        "200":
+          description: |
+            Settings were updated successfully and applied in the application UI.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              examples:
+                updatedPlutoAlias1:
+                  summary: Settings updated for Pluto Alias 1
+                  value:
+                    status: ok
+                    message: "Updated settings for 'Pluto Alias 1'"
+        "400":
+          description: |
+            Request body is missing required fields, has wrong types, or values
+            are outside the allowed ranges.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingIqRate:
+                  summary: Empty body - first missing field
+                  description: |
+                    Empty request body `{}`. Validation reports the first
+                    missing required field (`IQ_rate`).
+                  value:
+                    status: error
+                    message: "Missing required parameter: 'IQ_rate'"
+                missingGain:
+                  summary: Missing gain field
+                  description: |
+                    When `IQ_rate` and `center_frequency` are present
+                    but `gain` is omitted.
+                  value:
+                    status: error
+                    message: "Missing required parameter: 'gain'"
+                invalidTypeGain:
+                  summary: Wrong JSON type for gain
+                  description: |
+                    When `gain` is sent as a string (for example `"bad"`)
+                    instead of a number.
+                  value:
+                    status: error
+                    message: "Invalid type for 'gain': expected double"
+                invalidGainRange:
+                  summary: gain outside allowed range
+                  description: |
+                    Example for `gain: 9999`. Allowed range: -89 to 0.
+                  value:
+                    status: error
+                    message: "Invalid value for gain: must be between -89 and 0"
+                invalidIqRateRange:
+                  summary: IQ_rate outside allowed range
+                  description: |
+                    Example for out-of-range `IQ_rate` (for example `-1`).
+                    Message uses mega-unit notation (`M`).
+                  value:
+                    status: error
+                    message: "Invalid value for IQ_rate: must be between 2.083333M and 61.44M"
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "404":
+          description: |
+            Requested SDR alias was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                sdrAliasNotFound:
+                  summary: Unknown SDR alias
+                  value:
+                    status: error
+                    message: "SDR 'NoSuchDevice' not found"
+        "405":
+          description: |
+            Unsupported method on this path. Settings support `GET` and `PUT`.
+            `POST .../settings` returns `Method POST not allowed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodPost:
+                  summary: POST not allowed
+                  value:
+                    status: error
+                    message: Method POST not allowed
+                methodDelete:
+                  summary: DELETE not allowed
+                  value:
+                    status: error
+                    message: Method DELETE not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+  /gp-jammer/api/v1/sdrs/{sdr_alias}/start:
+    post:
+      tags:
+        - Generation Control
+      operationId: startGeneration
+      summary: Start signal generation
+      description: |
+        Sends the start signal generation command for the specified SDR.
+
+        Request body is not required.
+
+        Success message format:
+        `Started signal generation for '<userAlias>'`
+
+        Idempotent behavior: calling `POST .../start` when
+        generation is already running still returns `200 OK` with the same
+        success message.
+
+        After a successful start, `GET /gp-jammer/api/v1/sdrs` and
+        `GET /gp-jammer/api/v1/sdrs/{sdr_alias}` return `genStatus: true`
+        for that device.
+
+      parameters:
+        - $ref: "#/components/parameters/SdrAlias"
+      security:
+        - {}
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: |
+            Signal generation was started (or already running - same response).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              examples:
+                startedPlutoAlias1:
+                  summary: Generation started for Pluto Alias 1
+                  value:
+                    status: ok
+                    message: "Started signal generation for 'Pluto Alias 1'"
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "404":
+          description: |
+            No matching SDR for `{sdr_alias}`.
+
+            Returned for an unknown alias and for a previously known alias after
+            the SDR was disconnected (device gone from `GET /sdrs`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                sdrNotFound:
+                  summary: Unknown or disconnected SDR
+                  value:
+                    status: error
+                    message: "SDR 'Pluto Alias 1' not found"
+        "405":
+          description: |
+            Only `POST` is allowed. Message format matches other endpoints:
+            `Method GET not allowed`, `Method PUT not allowed`, etc.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodGet:
+                  summary: GET not allowed
+                  value:
+                    status: error
+                    message: Method GET not allowed
+                methodPut:
+                  summary: PUT not allowed
+                  value:
+                    status: error
+                    message: Method PUT not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+  /gp-jammer/api/v1/sdrs/{sdr_alias}/stop:
+    post:
+      tags:
+        - Generation Control
+      operationId: stopGeneration
+      summary: Stop signal generation
+      description: |
+        Sends the stop signal generation command for the specified SDR.
+
+        Request body is not required.
+
+        Success message format:
+        `Stopped signal generation for '<userAlias>'`
+
+        Idempotent behavior: calling `POST .../stop` when
+        generation is already stopped still returns `200 OK` with the same
+        success message.
+
+        After a successful stop, `GET /gp-jammer/api/v1/sdrs` and
+        `GET /gp-jammer/api/v1/sdrs/{sdr_alias}` return `genStatus: false`
+        for that device.
+
+      parameters:
+        - $ref: "#/components/parameters/SdrAlias"
+      security:
+        - {}
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: |
+            Signal generation was stopped (or already stopped - same response).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              examples:
+                stoppedPlutoAlias1:
+                  summary: Generation stopped for Pluto Alias 1
+                  value:
+                    status: ok
+                    message: "Stopped signal generation for 'Pluto Alias 1'"
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "404":
+          description: |
+            No matching SDR for `{sdr_alias}`.
+
+            Returned for an unknown alias and for a previously known alias after
+            the SDR was disconnected (device gone from `GET /sdrs`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                sdrNotFound:
+                  summary: Unknown or disconnected SDR
+                  value:
+                    status: error
+                    message: "SDR 'Pluto Alias 1' not found"
+        "405":
+          description: |
+            Only `POST` is allowed. Message format matches other endpoints:
+            `Method GET not allowed`, `Method PUT not allowed`, etc.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodGet:
+                  summary: GET not allowed
+                  value:
+                    status: error
+                    message: Method GET not allowed
+                methodPut:
+                  summary: PUT not allowed
+                  value:
+                    status: error
+                    message: Method PUT not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+  /gp-jammer/api/v1/sdrs/{sdr_alias}/interference:
+    post:
+      tags:
+        - Interference Selection
+      operationId: selectInterference
+      summary: Select interference
+      description: |
+        Executes interference IQ data generation for the specified SDR using the
+        provided parameter values.
+
+        Query parameters `base` and `name` identify the interference.
+        Take both values from `GET /interferences`.
+        The JSON body provides interference-specific parameter values.
+
+        Use `GET /gp-jammer/api/v1/interferences/info` to learn valid parameter
+        names, types, and ranges for the selected interference.
+
+        Success message format:
+        `Successfully selected interference '<shortName>'`
+
+        where `<shortName>` is the short interference name (for example `CHIRP`),
+        not the full relative path from `GET /interferences`.
+
+      parameters:
+        - $ref: "#/components/parameters/SdrAlias"
+        - $ref: "#/components/parameters/InterferenceBase"
+        - $ref: "#/components/parameters/InterferenceName"
+      requestBody:
+        required: true
+        description: |
+          Interference-specific parameters. Field names depend on the selected
+          interference. Use `GET /interferences/info` for names, types, and
+          ranges.
+
+          Values may be JSON numbers or numeric strings (for example
+          `1575420000` or `"1575420000"`). Non-numeric strings and values
+          outside the allowed range return `400` with
+          `Following interference variables are out of range: '<field>'`.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Dynamic parameter map for the selected interference.
+            examples:
+              chirp:
+                summary: CHIRP parameters
+                value:
+                  center_frequency: 1575420000
+                  IQ_rate: 40000000
+                  sweep_span: 20000000
+                  sweep_period: 0.00001
+              awgnChirp:
+                summary: AWGN-Chirp parameters
+                value:
+                  center_frequency: 1585e6
+                  IQ_rate: 56e6
+                  noise_bandwidth: 10e6
+                  signal_duration: 0.005
+              awgn:
+                summary: AWGN interference parameters
+                value:
+                  center_frequency: 1545000000
+                  IQ_rate: 56000000
+                  noise_bandwidth: 10000000
+                  signal_duration: 0.005
+      responses:
+        "200":
+          description: |
+            Interference was selected and IQ data generation was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              examples:
+                selectedChirp:
+                  summary: Chirp selected
+                  description: |
+                    Query `name=Basic Modulations\CHIRP` (or `\Chirp`) with a
+                    valid body. The message quotes the short library name
+                    (`CHIRP` / `Chirp` depending on the file).
+                  value:
+                    status: ok
+                    message: "Successfully selected interference 'Chirp'"
+                selectedChirpNumericString:
+                  summary: Chirp selected with numeric string field
+                  description: |
+                    `center_frequency` sent as `"6000000000"` (string) still
+                    returns `200` when the value is in range.
+                  value:
+                    status: ok
+                    message: "Successfully selected interference 'Chirp'"
+        "400":
+          description: |
+            Missing required query parameters, or invalid request body.
+
+            Query missing `base` / `name`: same messages as
+            `GET /interferences/info`.
+
+            Invalid body values — message format:
+            `Following interference variables are out of range: '<field>'`
+            (one or more field names).
+
+            Observed for out-of-range numbers (for example
+            `center_frequency: 60000000000`) and for non-numeric strings
+            (for example `center_frequency: "bad"`).
+
+            A numeric string such as `"6000000000"` is accepted and returns
+            `200` (no separate invalid-type error for number-vs-string).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingBase:
+                  summary: Missing base query parameter
+                  value:
+                    status: error
+                    message: "Missing required parameters: base"
+                missingName:
+                  summary: Missing name query parameter
+                  value:
+                    status: error
+                    message: "Missing required parameters: name"
+                missingBaseAndName:
+                  summary: Missing base and name
+                  value:
+                    status: error
+                    message: "Missing required parameters: base, name"
+                outOfRangeNumber:
+                  summary: Numeric value outside allowed range
+                  description: |
+                    Example for `center_frequency: 60000000000`.
+                  value:
+                    status: error
+                    message: "Following interference variables are out of range: 'center_frequency'"
+                nonNumericString:
+                  summary: Non-numeric string value
+                  description: |
+                    Example for `center_frequency: "bad"`. Same message as
+                    out-of-range. A numeric string like `"6000000000"` is
+                    accepted (`200`).
+                  value:
+                    status: error
+                    message: "Following interference variables are out of range: 'center_frequency'"
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "404":
+          description: SDR alias or interference name not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                sdrNotFound:
+                  summary: Unknown SDR alias in the path
+                  value:
+                    status: error
+                    message: "SDR 'unknown alias' not found"
+                interferenceNotFound:
+                  summary: Unknown interference name in query
+                  value:
+                    status: error
+                    message: "Interference 'Basic Modulations\\NoSuchThing' not found"
+        "405":
+          description: |
+            Only `POST` is allowed on this endpoint.
+
+            Message format: `Method <METHOD> not allowed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodGet:
+                  summary: GET not allowed
+                  value:
+                    status: error
+                    message: Method GET not allowed
+                methodPut:
+                  summary: PUT not allowed
+                  value:
+                    status: error
+                    message: Method PUT not allowed
+                methodDelete:
+                  summary: DELETE not allowed
+                  value:
+                    status: error
+                    message: Method DELETE not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+  /gp-jammer/api/v1/logs/gen:
+    get:
+      tags:
+        - Logs
+      operationId: getGenerationLogs
+      summary: Get generation log
+      description: |
+        Returns all generation log entries.
+
+        The response is a JSON array of log entries (not wrapped in `status` /
+        `data`).
+      security:
+        - {}
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Generation log entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationLogResponse"
+              examples:
+                entries:
+                  summary: Start and stop log entries
+                  value:
+                    - timestamp: "2026-07-15T10:00:00.000Z"
+                      channel: Pluto Alias
+                      action: Start
+                      info: "AWGN-Chirp. Power: -50 dBm; IQ rate: 56 MHz; Center frequency: 1.585 GHz"
+                    - timestamp: "2026-07-15T10:01:00.000Z"
+                      channel: Pluto Alias
+                      action: Stop
+                      info: ""
+        "401":
+          description: Missing API key header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missingApiKey:
+                  summary: Missing API key header
+                  value:
+                    status: error
+                    message: Missing GP-Jammer-API-Key
+        "403":
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidApiKey:
+                  summary: Invalid API key
+                  value:
+                    status: error
+                    message: Invalid GP-Jammer-API-Key
+        "405":
+          description: |
+            Only `GET` is allowed on this endpoint.
+
+            Message format: `Method <METHOD> not allowed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                methodPost:
+                  summary: POST not allowed
+                  value:
+                    status: error
+                    message: Method POST not allowed
+                methodPut:
+                  summary: PUT not allowed
+                  value:
+                    status: error
+                    message: Method PUT not allowed
+                methodDelete:
+                  summary: DELETE not allowed
+                  value:
+                    status: error
+                    message: Method DELETE not allowed
+        "500":
+          description: |
+            Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                internal:
+                  summary: Internal server error
+                  value:
+                    status: error
+                    message: Internal error occurred. Check GP-Jammer App error log
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: GP-Jammer-API-Key
+      description: |
+        API key from **SETTINGS -> API SERVER** in GP-Jammer.
+
+        Required when Authorization Mode is **API key**.
+        When **No Auth** is selected, requests work without this header.
+
+        Click **Generate** to create a new key, then **APPLY**.
+
+  parameters:
+    SdrAlias:
+      name: sdr_alias
+      in: path
+      required: true
+      description: |
+        SDR device alias returned in the `userAlias` field by
+        `GET /gp-jammer/api/v1/sdrs`.
+
+        URL-encode spaces and special characters.
+
+        Example aliases:
+
+        | Alias | Encoded path segment |
+        | --- | --- |
+        | `Pluto Alias 1` | `Pluto%20Alias%201` |
+        | `Pluto Alias 2` | `Pluto%20Alias%202` |
+        | `Pluto Alias` | `Pluto%20Alias` |
+
+        Read current `userAlias` values from `GET /gp-jammer/api/v1/sdrs`.
+      schema:
+        type: string
+      example: Pluto Alias 1
+
+    InterferenceBase:
+      name: base
+      in: query
+      required: true
+      description: |
+        Local interference library folder path from
+        `GET /gp-jammer/api/v1/interferences` (`data[].base`).
+
+        Use a `base` value from that list response. The path is
+        installation-specific and can change with packs or machine.
+      schema:
+        type: string
+      example: 'C:\Users\User\AppData\Local\GPSPATRON\GP-Jammer\Python data'
+
+    InterferenceName:
+      name: name
+      in: query
+      required: true
+      description: |
+        Interference name relative to `base`, from
+        `GET /gp-jammer/api/v1/interferences` (`data[].names`).
+
+        Use a `name` value from that list response. The set of names
+        depends on the installed interference packs.
+      schema:
+        type: string
+      example: Basic Modulations\AWGN-Chirp
+
+  schemas:
+    StatusOk:
+      type: string
+      enum:
+        - ok
+      example: ok
+
+    StatusError:
+      type: string
+      enum:
+        - error
+      example: error
+
+    InterferenceGroup:
+      type: object
+      required:
+        - base
+        - names
+      properties:
+        base:
+          type: string
+          description: Base path of an interference library folder.
+          example: 'C:\Users\User\AppData\Local\GPSPATRON\GP-Jammer\Python data'
+        names:
+          type: array
+          description: Interference names available under this base path.
+          items:
+            type: string
+          example:
+            - Basic Modulations\AWGN-Chirp
+            - Basic Modulations\AWGN
+            - GNSS\GPS-CA-L1-Signal-Matched
+
+    InterferenceVariable:
+      type: object
+      description: |
+        One interference parameter definition from
+        `GET /interferences/info`.
+
+        `default`, `min`, and `max` are strings (often scientific notation),
+        even when `type` is `number`.
+      required:
+        - name
+        - type
+        - description
+        - default
+        - min
+        - max
+      properties:
+        name:
+          type: string
+          description: Parameter key for the select-interference request body.
+          example: center_frequency
+        type:
+          type: string
+          description: "Parameter type (for example `number`)."
+          example: number
+        description:
+          type: string
+          example: Center frequency (Hz)
+        default:
+          type: string
+          description: Default value as a string (for example `"1585e6"`).
+          example: "1585e6"
+        min:
+          type: string
+          description: Minimum allowed value as a string.
+          example: "70e6"
+        max:
+          type: string
+          description: Maximum allowed value as a string.
+          example: "6e9"
+
+    InterferenceInfo:
+      type: object
+      description: |
+        Interference metadata returned by `GET /interferences/info`.
+      required:
+        - name
+        - description
+        - variables
+      properties:
+        name:
+          type: string
+          description: |
+            Short interference name (for example `AWGN-Chirp`).
+            This may differ from the relative path used in the `name` query
+            parameter (`Basic Modulations\AWGN-Chirp`).
+          example: AWGN-Chirp
+        description:
+          type: string
+          example: Additive White Gaussian Noise (AWGN) complexly multiplied by the Chirp signal interference
+        variables:
+          type: array
+          items:
+            $ref: "#/components/schemas/InterferenceVariable"
+
+    SdrListItem:
+      type: object
+      description: |
+        SDR device connection and generation state as returned by
+        `GET /gp-jammer/api/v1/sdrs`.
+      required:
+        - genStatus
+        - userAlias
+      properties:
+        genStatus:
+          type: boolean
+          description: |
+            Generation status for the device.
+
+            - `false` - device is idle (generation not running)
+            - `true` - signal generation is active
+          example: false
+        userAlias:
+          type: string
+          description: |
+            Human-readable SDR alias. Use this value as `{sdr_alias}` in
+            device-specific endpoints (URL-encode if needed).
+          example: Pluto Alias
+
+    SdrSettings:
+      type: object
+      description: |
+        SDR configuration payload for `GET`/`PUT .../settings`.
+
+        All three fields are required on `PUT`. Values must be JSON numbers
+        (double), not strings.
+      required:
+        - IQ_rate
+        - center_frequency
+        - gain
+      properties:
+        IQ_rate:
+          type: number
+          format: double
+          description: |
+            IQ sample rate in Hz.
+
+            Allowed range: between `2.083333M` and `61.44M`
+            (approximately 2,083,333 Hz to 61,440,000 Hz).
+            Out-of-range responses use mega-unit notation in the message.
+          example: 56000000
+        center_frequency:
+          type: number
+          format: double
+          description: |
+            Center frequency in Hz.
+
+            Must be a JSON number (double).
+          example: 1585000000
+        gain:
+          type: number
+          format: double
+          description: |
+            Output gain in dB.
+
+            Allowed range: `-89` to `0` inclusive.
+            Values outside this range return `400` with
+            `Invalid value for gain: must be between -89 and 0`.
+          minimum: -89
+          maximum: 0
+          example: -50
+
+    CurrentInterference:
+      type: object
+      description: |
+        Currently selected interference for the SDR device.
+
+        Parameter values inside `parameters` are returned as strings
+        (scientific notation may appear, for example `"56e6"`).
+      required:
+        - base
+        - name
+        - parameters
+      properties:
+        base:
+          type: string
+          description: Local interference library folder path.
+          example: 'C:\Users\User\AppData\Local\GPSPATRON\GP-Jammer\Python data'
+        name:
+          type: string
+          description: Interference name relative to `base`.
+          example: Basic Modulations\AWGN-Chirp
+        parameters:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Interference-specific parameters. Keys depend on the selected
+            interference. Values are strings (not numbers).
+          example:
+            IQ_rate: "56e6"
+            center_frequency: "1585e6"
+            noise_bandwidth: "10e6"
+            sweep_period: "5.000000e-05"
+            sweep_span: "56e6"
+
+    SdrInfo:
+      type: object
+      description: |
+        Detailed SDR device payload returned by
+        `GET /gp-jammer/api/v1/sdrs/{sdr_alias}`.
+      required:
+        - userAlias
+        - id
+        - firmwareVersion
+        - genStatus
+        - settings
+      properties:
+        userAlias:
+          type: string
+          description: Human-readable SDR alias.
+          example: Pluto Alias
+        id:
+          type: string
+          description: Device identifier.
+          example: Pluto_D
+        firmwareVersion:
+          type: string
+          description: SDR firmware version string.
+          example: "1.1.5"
+        genStatus:
+          type: boolean
+          description: |
+            Generation status.
+
+            - `false` - idle
+            - `true` - generation running
+          example: false
+        settings:
+          $ref: "#/components/schemas/SdrSettings"
+        currentInterference:
+          $ref: "#/components/schemas/CurrentInterference"
+
+    LogEntry:
+      type: object
+      additionalProperties: true
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-07-15T10:00:00.000Z"
+        channel:
+          type: string
+          example: Pluto Alias
+        interference:
+          type: string
+          example: Basic Modulations\AWGN
+        action:
+          type: string
+          example: Start
+        info:
+          type: string
+          example: ""
+
+    MessageResponse:
+      type: object
+      required:
+        - status
+        - message
+      properties:
+        status:
+          $ref: "#/components/schemas/StatusOk"
+        message:
+          type: string
+          example: "Updated settings for 'Pluto Alias 1'"
+
+    ErrorResponse:
+      type: object
+      required:
+        - status
+        - message
+      properties:
+        status:
+          $ref: "#/components/schemas/StatusError"
+        message:
+          type: string
+          example: Invalid parameter value
+
+    InterferenceListResponse:
+      type: object
+      required:
+        - status
+        - data
+      properties:
+        status:
+          $ref: "#/components/schemas/StatusOk"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/InterferenceGroup"
+
+    InterferenceInfoResponse:
+      type: object
+      required:
+        - status
+        - data
+      properties:
+        status:
+          $ref: "#/components/schemas/StatusOk"
+        data:
+          $ref: "#/components/schemas/InterferenceInfo"
+
+    SdrListResponse:
+      type: object
+      description: |
+        Response containing all SDR devices visible to GP-Jammer.
+      required:
+        - status
+        - data
+      properties:
+        status:
+          $ref: "#/components/schemas/StatusOk"
+        data:
+          type: array
+          description: |
+            Connected SDR devices. Empty when no devices are available.
+          items:
+            $ref: "#/components/schemas/SdrListItem"
+
+    SdrInfoResponse:
+      type: object
+      required:
+        - status
+        - data
+      properties:
+        status:
+          $ref: "#/components/schemas/StatusOk"
+        data:
+          $ref: "#/components/schemas/SdrInfo"
+
+    SdrSettingsResponse:
+      type: object
+      required:
+        - status
+        - data
+      properties:
+        status:
+          $ref: "#/components/schemas/StatusOk"
+        data:
+          $ref: "#/components/schemas/SdrSettings"
+
+    GenerationLogResponse:
+      type: array
+      description: List of generation log entries.
+      items:
+        $ref: "#/components/schemas/LogEntry"
