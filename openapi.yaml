@@ -5,9 +5,7 @@ info:
   contact:
     name: GP-Jammer API Documentation
   description: |
-    Local HTTP API for the **GP-Jammer** application: browse the
-    interference library, configure SDR settings, select interference
-    parameters, start or stop signal generation, and read generation logs.
+    Local HTTP API for the GP-Jammer application: configure SDR settings, set interference parameters, select interference, control signal generation and retrieve generation logs.
 
     ## Authentication
 
