@@ -5,34 +5,9 @@ info:
   contact:
     name: GP-Jammer API Documentation
   description: |
-    Local HTTP API for controlling **GP-Jammer** SDR devices: browse the
-    interference library, configure SDR settings, select interference parameters,
-    start or stop signal generation, and read generation logs.
-
-    ## API server setup (GP-Jammer application)
-
-    Configure the API in the desktop application before sending any requests:
-
-    1. Open **GP-Jammer** as administrator.
-    2. Open the left sidebar and select **SETTINGS**.
-    3. Select the **API SERVER** tab.
-    4. In **LOCAL API SERVER SETTINGS**, enable **Enable API Server**.
-    5. Set **Port** - the TCP port the HTTP server listens on (default `5000`).
-       Ensure the port is not blocked or already in use. Use this port in API
-       clients as `http://localhost:<port>`.
-    6. Set **Timeout, ms** - internal timeout for the local API server (default
-       `15000`). Increase the value if clients receive timeout errors, then click
-       **APPLY**.
-    7. Optional: enable **Allow Remote Access** to accept connections from other
-       machines on the network. Requires elevated privileges to register the
-       port and add a firewall exception.
-    8. Choose **Authorization**:
-       - **No Auth** - requests work without the `GP-Jammer-API-Key` header.
-       - **API key** - copy the key from this screen (or click **Generate** for
-         a new one) and send it in every request header.
-    9. Click **APPLY** to save changes.
-
-    All paths in this specification are relative to `http://localhost:<port>`.
+    Local HTTP API for the **GP-Jammer** application: browse the
+    interference library, configure SDR settings, select interference
+    parameters, start or stop signal generation, and read generation logs.
 
     ## Authentication
 
@@ -93,13 +68,309 @@ info:
 
     ## Quick start
 
-    1. Complete the **API server setup** steps above.
-    2. Call `GET /gp-jammer/api/v1/sdrs` to list devices and read each `userAlias`.
-    3. Call `GET /gp-jammer/api/v1/interferences` then `GET /interferences/info`.
-    4. Select interference with `POST .../interference`, then `POST .../start`.
-    5. If API key authorization is enabled, add `GP-Jammer-API-Key` to every request.
+    Typical sequence from a connected device to generation and logs. Each
+    request is described in more detail below.
+
+    Enable local API server in GP-Jammer (**SETTINGS -> API SERVER**) and click
+    **APPLY**. If authorization mode is **API key**, send `GP-Jammer-API-Key`
+    on every request. `{sdr_alias}` is `userAlias` from device list.
+    URL-encode spaces (`Pluto Alias 1` -> `Pluto%20Alias%201`).
+
+    ### 1. List connected devices
+
+    `GET /gp-jammer/api/v1/sdrs` returns every connected device and its
+    `userAlias`. Later device requests use this alias as `{sdr_alias}`. If
+    `data` is empty, no device is connected yet.
+
+    ### 2. Read device details
+
+    Use `{sdr_alias}` from step 1 to inspect the device (settings, generation
+    status, selected interference):
+    `GET /gp-jammer/api/v1/sdrs/{sdr_alias}`.
+
+    ### 3. Read device settings
+
+    Read IQ rate, center frequency, and gain for the same device:
+    `GET /gp-jammer/api/v1/sdrs/{sdr_alias}/settings`.
+
+    ### 4. Update device settings
+
+    Change those values with
+    `PUT /gp-jammer/api/v1/sdrs/{sdr_alias}/settings`. Skip this step if the
+    values from step 3 are already correct.
+
+    ### 5. List the interference library
+
+    Next, choose an interference for the device.
+    `GET /gp-jammer/api/v1/interferences` lists the library. Each item has
+    `base` (local folder of the library) and `names` (interference names in
+    that folder). Copy `base` and one `name` for steps 6 and 7. More detail
+    is in this endpoint below.
+
+    ### 6. Read interference parameters
+
+    Read parameter definitions for the chosen interference:
+    `GET /gp-jammer/api/v1/interferences/info` with the same `base` and
+    `name`. This request is read-only. It does not apply the interference to
+    a device.
+
+    ### 7. Select interference for the device
+
+    `POST /gp-jammer/api/v1/sdrs/{sdr_alias}/interference` with the same
+    `base` and `name` does both in one request: it applies the interference
+    to the device, and the JSON body sets its parameters (from step 6,
+    adjusted if needed).
+
+    ### 8. Start generation
+
+    Device settings and interference are now in place. Start generation:
+    `POST /gp-jammer/api/v1/sdrs/{sdr_alias}/start`.
+
+    ### 9. Stop generation
+
+    When the run is finished, stop generation on the same device:
+    `POST /gp-jammer/api/v1/sdrs/{sdr_alias}/stop`. This does not remove the
+    selected interference or change device settings.
+
+    ### 10. Read generation logs
+
+    After start or stop, `GET /gp-jammer/api/v1/logs/gen` returns log entries
+    for generation (`timestamp`, `channel`, `action`, `info`). Use this to
+    confirm what ran on the device.
 
     All paths in this specification are relative to `http://localhost:<port>`.
+
+    ## Python example: three devices, three interferences
+
+    The Quick start sequence in Python (`http.client`) for three connected
+    devices and a different interference on each. Authorization mode is
+    **No Auth**.
+
+    | Device | Interference |
+    | --- | --- |
+    | `SDR-1` | `CHIRP` |
+    | `SDR-2` | `AWGN` |
+    | `SDR-3` | `CW` |
+
+    `PUT` settings runs on `SDR-1` only (gain `-45` dB). After start the
+    script waits 20 seconds, then stops all three. Apply can take several
+    seconds.
+
+    Copy `userAlias` from `GET /sdrs` and `base` from `GET /interferences`.
+    Replace `SDR-1` / `SDR-2` / `SDR-3` and `BASE` if they differ. Three
+    devices must be connected. One `HTTPConnection` is enough: read each
+    response fully before the next request. Query `base` and `name` need
+    `urlencode`.
+
+    Save as a `.py` file and run from a terminal (`python file.py` or
+    `py file.py`).
+
+    ```python
+    import http.client
+    import json
+    import time
+    from urllib.parse import urlencode
+
+    # Copy userAlias from GET /sdrs. Copy base from GET /interferences.
+    BASE = r"C:\Users\User\AppData\Local\GPSPATRON\GP-Jammer\Python data"
+
+    conn = http.client.HTTPConnection("localhost:5000")
+    json_headers = {"Content-Type": "application/json"}
+
+    # 1. List connected devices
+    conn.request("GET", "/gp-jammer/api/v1/sdrs")
+    response = conn.getresponse()
+    print("GET /sdrs", response.status)
+    print(response.read().decode())
+    print()
+
+    # 2. Device details
+    conn.request("GET", "/gp-jammer/api/v1/sdrs/SDR-1")
+    response = conn.getresponse()
+    print("GET SDR-1", response.status)
+    print(response.read().decode())
+    print()
+
+    conn.request("GET", "/gp-jammer/api/v1/sdrs/SDR-2")
+    response = conn.getresponse()
+    print("GET SDR-2", response.status)
+    print(response.read().decode())
+    print()
+
+    conn.request("GET", "/gp-jammer/api/v1/sdrs/SDR-3")
+    response = conn.getresponse()
+    print("GET SDR-3", response.status)
+    print(response.read().decode())
+    print()
+
+    # 3. Device settings
+    conn.request("GET", "/gp-jammer/api/v1/sdrs/SDR-1/settings")
+    response = conn.getresponse()
+    print("GET settings SDR-1", response.status)
+    print(response.read().decode())
+    print()
+
+    conn.request("GET", "/gp-jammer/api/v1/sdrs/SDR-2/settings")
+    response = conn.getresponse()
+    print("GET settings SDR-2", response.status)
+    print(response.read().decode())
+    print()
+
+    conn.request("GET", "/gp-jammer/api/v1/sdrs/SDR-3/settings")
+    response = conn.getresponse()
+    print("GET settings SDR-3", response.status)
+    print(response.read().decode())
+    print()
+
+    # 4. Update settings on one device
+    body = json.dumps({
+        "IQ_rate": 40e6,
+        "center_frequency": 1575.42e6,
+        "gain": -45,
+    })
+    conn.request(
+        "PUT",
+        "/gp-jammer/api/v1/sdrs/SDR-1/settings",
+        body=body,
+        headers=json_headers,
+    )
+    response = conn.getresponse()
+    print("PUT settings SDR-1", response.status)
+    print(response.read().decode())
+    print()
+
+    # 5. Interference library
+    conn.request("GET", "/gp-jammer/api/v1/interferences")
+    response = conn.getresponse()
+    print("GET /interferences", response.status)
+    print(response.read().decode())
+    print()
+
+    # 6. Interference parameters (read-only)
+    query = urlencode({"base": BASE, "name": r"Basic Modulations\CHIRP"})
+    conn.request("GET", "/gp-jammer/api/v1/interferences/info?" + query)
+    response = conn.getresponse()
+    print("INFO CHIRP", response.status)
+    print(response.read().decode())
+    print()
+
+    query = urlencode({"base": BASE, "name": r"Basic Modulations\AWGN"})
+    conn.request("GET", "/gp-jammer/api/v1/interferences/info?" + query)
+    response = conn.getresponse()
+    print("INFO AWGN", response.status)
+    print(response.read().decode())
+    print()
+
+    query = urlencode({"base": BASE, "name": r"Basic Modulations\CW"})
+    conn.request("GET", "/gp-jammer/api/v1/interferences/info?" + query)
+    response = conn.getresponse()
+    print("INFO CW", response.status)
+    print(response.read().decode())
+    print()
+
+    # 7. Apply CHIRP on SDR-1, AWGN on SDR-2, CW on SDR-3
+    # Apply can take several seconds.
+    query = urlencode({"base": BASE, "name": r"Basic Modulations\CHIRP"})
+    body = json.dumps({
+        "center_frequency": 1575.42e6,
+        "IQ_rate": 40e6,
+        "sweep_span": 20e6,
+        "sweep_period": 10e-6,
+    })
+    conn.request(
+        "POST",
+        "/gp-jammer/api/v1/sdrs/SDR-1/interference?" + query,
+        body=body,
+        headers=json_headers,
+    )
+    response = conn.getresponse()
+    print("POST interference SDR-1 CHIRP", response.status)
+    print(response.read().decode())
+    print()
+
+    query = urlencode({"base": BASE, "name": r"Basic Modulations\AWGN"})
+    body = json.dumps({
+        "center_frequency": 1575.42e6,
+        "IQ_rate": 40e6,
+        "noise_bandwidth": 10e6,
+        "signal_duration": 0.005,
+    })
+    conn.request(
+        "POST",
+        "/gp-jammer/api/v1/sdrs/SDR-2/interference?" + query,
+        body=body,
+        headers=json_headers,
+    )
+    response = conn.getresponse()
+    print("POST interference SDR-2 AWGN", response.status)
+    print(response.read().decode())
+    print()
+
+    query = urlencode({"base": BASE, "name": r"Basic Modulations\CW"})
+    body = json.dumps({
+        "center_frequency": 1575.42e6,
+        "IQ_rate": 10e6,
+    })
+    conn.request(
+        "POST",
+        "/gp-jammer/api/v1/sdrs/SDR-3/interference?" + query,
+        body=body,
+        headers=json_headers,
+    )
+    response = conn.getresponse()
+    print("POST interference SDR-3 CW", response.status)
+    print(response.read().decode())
+    print()
+
+    # 8. Start all three
+    conn.request("POST", "/gp-jammer/api/v1/sdrs/SDR-1/start")
+    response = conn.getresponse()
+    print("START SDR-1", response.status)
+    print(response.read().decode())
+    print()
+
+    conn.request("POST", "/gp-jammer/api/v1/sdrs/SDR-2/start")
+    response = conn.getresponse()
+    print("START SDR-2", response.status)
+    print(response.read().decode())
+    print()
+
+    conn.request("POST", "/gp-jammer/api/v1/sdrs/SDR-3/start")
+    response = conn.getresponse()
+    print("START SDR-3", response.status)
+    print(response.read().decode())
+    print()
+
+    print("Waiting 20 seconds before stop...")
+    time.sleep(20)
+
+    # 9. Stop all three
+    conn.request("POST", "/gp-jammer/api/v1/sdrs/SDR-1/stop")
+    response = conn.getresponse()
+    print("STOP SDR-1", response.status)
+    print(response.read().decode())
+    print()
+
+    conn.request("POST", "/gp-jammer/api/v1/sdrs/SDR-2/stop")
+    response = conn.getresponse()
+    print("STOP SDR-2", response.status)
+    print(response.read().decode())
+    print()
+
+    conn.request("POST", "/gp-jammer/api/v1/sdrs/SDR-3/stop")
+    response = conn.getresponse()
+    print("STOP SDR-3", response.status)
+    print(response.read().decode())
+    print()
+
+    # 10. Generation logs
+    conn.request("GET", "/gp-jammer/api/v1/logs/gen")
+    response = conn.getresponse()
+    print("GET /logs/gen", response.status)
+    print(response.read().decode())
+
+    conn.close()
+    ```
 
 servers:
   - url: http://localhost:5000
@@ -122,7 +393,7 @@ tags:
   - name: Interference Library
     description: Browse available interferences and read parameter definitions.
   - name: Interference Selection
-    description: Select an interference and generate IQ data for an SDR device.
+    description: Apply an interference to a device and set its parameters.
   - name: Generation Control
     description: Start and stop signal generation for a selected SDR device.
   - name: Logs
@@ -136,10 +407,10 @@ x-tagGroups:
   - name: Library
     tags:
       - Interference Library
+      - Interference Selection
   - name: Generation
     tags:
       - Generation Control
-      - Interference Selection
   - name: Monitoring
     tags:
       - Logs
@@ -1383,17 +1654,20 @@ paths:
       tags:
         - Interference Selection
       operationId: selectInterference
-      summary: Select interference
+      summary: Apply and change interference
       description: |
-        Executes interference IQ data generation for the specified SDR using the
-        provided parameter values.
+        Applies a chosen interference to that device and sets its parameters
+        in one request.
 
-        Query parameters `base` and `name` identify the interference.
-        Take both values from `GET /interferences`.
-        The JSON body provides interference-specific parameter values.
+        Query `base` and `name` identify the interference. Take both from
+        `GET /interferences`. JSON body sets parameter values for that
+        interference.
 
-        Use `GET /gp-jammer/api/v1/interferences/info` to learn valid parameter
-        names, types, and ranges for the selected interference.
+        Use `GET /gp-jammer/api/v1/interferences/info` for valid parameter
+        names, types, and ranges.
+
+        This request does not start signal generation. Start is
+        `POST /gp-jammer/api/v1/sdrs/{sdr_alias}/start`.
 
         Success message format:
         `Successfully selected interference '<shortName>'`
@@ -1408,9 +1682,12 @@ paths:
       requestBody:
         required: true
         description: |
-          Interference-specific parameters. Field names depend on the selected
+          Interference-specific parameters. Field names depend on that
           interference. Use `GET /interferences/info` for names, types, and
           ranges.
+
+          This body sets the interference parameters applied to that device
+          together with query `base` and `name`.
 
           Values may be JSON numbers or numeric strings (for example
           `1575420000` or `"1575420000"`). Non-numeric strings and values
@@ -1447,7 +1724,7 @@ paths:
       responses:
         "200":
           description: |
-            Interference was selected and IQ data generation was accepted.
+            Interference applied to that device with the provided parameters.
           content:
             application/json:
               schema:
